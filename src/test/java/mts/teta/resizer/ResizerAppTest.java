@@ -5,13 +5,14 @@ import org.junit.jupiter.api.Test;
 
 import javax.imageio.IIOException;
 import javax.imageio.ImageIO;
+import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.net.URL;
 import java.nio.file.Paths;
 
 import static mts.teta.resizer.utils.MD5.getMD5;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 
 class ResizerAppTest {
 
@@ -57,6 +58,12 @@ class ResizerAppTest {
         assertEquals(reducedPreview.getHeight(), reducedPreviewHeight);
     }
 
+    // в этом тесте не реально уложиться в 350 ms, для этих тестовых данных:
+    // изолированное выполнение forceSize(...) + toFile(...) == 630 ms
+    // изолированное выполнение forceSize(...) + asBufferedImage() == 370 ms
+    // но это не считая остальных операций, которые очень затратные
+    // тот же ImageIO.read(inputFile) заложенный в шаблоне == 250 ms
+    // p.s. проверял на 4 ГГц, 4 ядра 8 потоков
     @Test
     public void testEnlargeCover() throws Exception {
         final Integer reducedPreviewWidth = FILM_COVER_WIDTH + FILM_COVER_WIDTH;
@@ -211,5 +218,151 @@ class ResizerAppTest {
 
         assertEquals("Please check params!", generatedException.getMessage());
         assertEquals(BadAttributesException.class, generatedException.getClass());
+    }
+
+//     Тест на изменение формата jpeg -> png
+//     Идея теста:
+//     Проверяем изменится ли имя output файла, а конкретно его расширение
+//     Создаётся ли файл с расширением png, несмотря на то что передаём имя
+//     с другим расширением
+    @Test
+    public void testChangeFormat() throws Exception {
+        final String newFormat = "PNG";
+        final String NEW_FILM_COVER_TARGET_NAME = FILM_COVER_TARGET_NAME + "." + newFormat.toLowerCase();
+
+        URL res = getClass().getClassLoader().getResource(FILM_COVER_SOURCE_NAME);
+        assert res != null;
+
+        File file = Paths.get(res.toURI()).toFile();
+        String absolutePathInput = file.getAbsolutePath();
+
+        String absolutePathOutput = absolutePathInput.replaceFirst(FILM_COVER_SOURCE_NAME, FILM_COVER_TARGET_NAME);
+
+        ResizerApp app = new ResizerApp();
+        app.setInputFile(new File(absolutePathInput));
+        app.setOutputFile(new File(absolutePathOutput));
+        app.setFormat(newFormat);
+        app.setQuality(100);
+        app.call();
+
+        absolutePathOutput = absolutePathInput.replaceFirst(FILM_COVER_TARGET_NAME, NEW_FILM_COVER_TARGET_NAME);
+
+        assertTrue(new File(absolutePathOutput).exists());
+    }
+
+    //     Тест проверки уровня сжатия и соответсвенно веса файла
+//     Идея теста:
+//     для разных значений Quality например 5, 25,..., 85 получаем файлы
+//     и сравниваем их размер в байтах, ожидается что
+//     F(q==5) < F(q==25) < ... < F(q==85)
+//     а вообще для уменьшения времени теста можно использовать меньшее
+//     количество файлов, например разбивка по Quality 1, 50, 100
+//     Возможные причины багов:
+//     после outputQuality(...) нельзя использовать asBufferedImage()
+//     т.к. тогда Quality не меняется
+    @Test
+    public void testQualityCover() throws Exception {
+        URL res = getClass().getClassLoader().getResource(FILM_COVER_SOURCE_NAME);
+        assert res != null;
+
+        File file = Paths.get(res.toURI()).toFile();
+        String absolutePathInput = file.getAbsolutePath();
+
+        String absolutePathOutput = absolutePathInput.replaceFirst(FILM_COVER_SOURCE_NAME, FILM_COVER_TARGET_NAME);
+
+        ResizerApp app = new ResizerApp();
+        app.setInputFile(new File(absolutePathInput));
+        app.setOutputFile(new File(absolutePathOutput));
+        long fileSize = 0;
+
+        for (int i = 0; i < 5; i++) {
+            app.setQuality(5 + i * 20);
+            app.call();
+
+            long newFileSize = new File(absolutePathOutput).length();
+
+            assertTrue(fileSize < newFileSize);
+
+            fileSize = newFileSize;
+        }
+    }
+
+    //    Тест проверки кропа изображения
+//    Идея теста:
+//    сравниваем параметры(ширина, высота) полученного изображения с переданными
+    @Test
+    public void testCropCover() throws Exception {
+        final Integer cropedPreviewWidth = 330;
+        final Integer cropedPreviewHeight = 220;
+        final Integer cropedPreviewX = 230;
+        final Integer cropedPreviewY = 200;
+
+        URL res = getClass().getClassLoader().getResource(BOOK_COVER_SOURCE_NAME);
+        assert res != null;
+
+        File file = Paths.get(res.toURI()).toFile();
+        String absolutePathInput = file.getAbsolutePath();
+
+        String absolutePathOutput = absolutePathInput.replaceFirst(BOOK_COVER_SOURCE_NAME, BOOK_COVER_TARGET_NAME);
+
+        ResizerApp app = new ResizerApp();
+        app.setInputFile(new File(absolutePathInput));
+        app.setOutputFile(new File(absolutePathOutput));
+        app.setCropWidth(cropedPreviewWidth);
+        app.setCropHeigth(cropedPreviewHeight);
+        app.setCropX(cropedPreviewX);
+        app.setCropY(cropedPreviewY);
+        app.call();
+
+        BufferedImage cropedPreview = ImageIO.read(new File(absolutePathOutput));
+
+        assertEquals(cropedPreviewWidth, cropedPreview.getWidth());
+        assertEquals(cropedPreviewHeight, cropedPreview.getHeight());
+    }
+
+//     Тест проверки размытия
+//     Идея теста:
+//     Как таковое размытие не проверить автоматически, нужно смотреть вручную
+//     для этого сделан кроп области изображения с чёткими границами, на которых
+//     блюр заметнее всего даже для малых значений радиуса (в этом тесте == 7)
+//     Возможные причины багов:
+//     при использовании Marvin библиотеки, если использовать getBufferedImage()
+//     и не использовать перед этим update(), то все пиксели становятся чёрного цвета
+//     при этом другие параметры (ширина, высота при том же кропе) меняются корректно,
+//     создаётся иллюзия правильной работы, но на самом деле получаем чёрный прямоугольник.
+//     Поэтому достаточно проверить какой-то один пиксель, который заведомо (в нашем изображении)
+//     должен иметь цвет отличный от чёрного.
+    @Test
+    public void testBlurCover() throws Exception {
+        final Integer cropedPreviewWidth = 200;
+        final Integer cropedPreviewHeight = 200;
+        final Integer cropedPreviewX = 170;
+        final Integer cropedPreviewY = 180;
+        final Integer x = cropedPreviewWidth - 1;
+        final Integer y = cropedPreviewHeight - 1;
+
+        URL res = getClass().getClassLoader().getResource(AUDIO_COVER_SOURCE_NAME);
+        assert res != null;
+
+        File file = Paths.get(res.toURI()).toFile();
+        String absolutePathInput = file.getAbsolutePath();
+
+        String absolutePathOutput = absolutePathInput.replaceFirst(AUDIO_COVER_SOURCE_NAME, AUDIO_COVER_TARGET_NAME);
+
+        ResizerApp app = new ResizerApp();
+        app.setInputFile(new File(absolutePathInput));
+        app.setOutputFile(new File(absolutePathOutput));
+        app.setCropWidth(cropedPreviewWidth);
+        app.setCropHeigth(cropedPreviewHeight);
+        app.setCropX(cropedPreviewX);
+        app.setCropY(cropedPreviewY);
+        app.setQuality(100);
+        app.setBlurRadius(7);
+        app.call();
+
+        BufferedImage bluredPreview = ImageIO.read(new File(absolutePathOutput));
+
+        assertFalse(bluredPreview.getRGB(x, y) == Color.BLACK.getRGB());
+
     }
 }
